@@ -19,10 +19,13 @@
 #define F_RTC          (F_REF / 256)
 #define F_TICK         1000000
 
+HAL_GPIO_PIN(PINX,      0, 6, sio_6)
 HAL_GPIO_PIN(LED,      0, 25, sio_25)
 HAL_GPIO_PIN(BUTTON,   0, 18, sio_18)
 HAL_GPIO_PIN(UART_TX,  0,  0, uart0_tx)
 HAL_GPIO_PIN(UART_RX,  0,  1, uart0_rx)
+HAL_GPIO_PIN(I2C0_SDA,  0,  4, i2c0_sda)
+HAL_GPIO_PIN(I2C0_SCL,  0,  5, i2c0_scl)
 
 //-----------------------------------------------------------------------------
 static volatile uint32_t timer_period;
@@ -71,6 +74,38 @@ static void uart_init(uint32_t baud)
 
   HAL_GPIO_UART_TX_init();
   HAL_GPIO_UART_RX_init();
+}
+
+//-----------------------------------------------------------------------------
+static void i2c0_init(void)
+{
+  RESETS_CLR->RESET = RESETS_RESET_i2c0_Msk;
+  while (0 == RESETS->RESET_DONE_b.i2c0);
+  
+  RESETS_CLR->RESET = RESETS_RESET_i2c0_Msk;
+  while (0 == RESETS->RESET_DONE_b.i2c0);
+
+  I2C0->IC_ENABLE = 0;
+
+  I2C0->IC_CON_b.MASTER_MODE = I2C0_IC_CON_MASTER_MODE_ENABLED;
+  I2C0->IC_CON_b.SPEED = I2C0_IC_CON_SPEED_FAST;
+  I2C0->IC_CON_b.IC_10BITADDR_SLAVE = I2C0_IC_CON_IC_10BITADDR_MASTER_ADDR_7BITS;
+  I2C0->IC_CON_b.IC_10BITADDR_MASTER = I2C0_IC_CON_IC_10BITADDR_SLAVE_ADDR_7BITS;
+  I2C0->IC_CON_b.IC_RESTART_EN = I2C0_IC_CON_IC_RESTART_EN_DISABLED;
+  I2C0->IC_CON_b.IC_SLAVE_DISABLE = I2C0_IC_CON_IC_SLAVE_DISABLE_SLAVE_DISABLED;
+  I2C0->IC_CON_b.STOP_DET_IFADDRESSED = I2C0_IC_CON_STOP_DET_IFADDRESSED_DISABLED;
+  I2C0->IC_CON_b.TX_EMPTY_CTRL = I2C0_IC_CON_TX_EMPTY_CTRL_ENABLED;
+  I2C0->IC_CON_b.RX_FIFO_FULL_HLD_CTRL = I2C0_IC_CON_RX_FIFO_FULL_HLD_CTRL_DISABLED;
+
+  I2C0->IC_FS_SCL_HCNT = 9601;
+  I2C0->IC_FS_SCL_LCNT = 14400;
+  I2C0->IC_FS_SPKLEN = 900;
+  I2C0->IC_SDA_HOLD = 37;
+
+  I2C0->IC_ENABLE = 1;
+  
+  HAL_GPIO_I2C0_SDA_init();
+  HAL_GPIO_I2C0_SCL_init();
 }
 
 //-----------------------------------------------------------------------------
@@ -172,24 +207,118 @@ static void sys_init(void)
 }
 
 //-----------------------------------------------------------------------------
+void i2cRead( uint8_t slvAdd, uint8_t regAdd, uint8_t* data, uint32_t len )
+{
+    (void)len;  // ignore it for now.
+    I2C0->IC_ENABLE = 0;
+    I2C0->IC_TAR = slvAdd;
+    I2C0->IC_ENABLE = 1;
+
+    I2C0->IC_DATA_CMD = ( ( I2C0_IC_DATA_CMD_RESTART_DISABLE << I2C0_IC_DATA_CMD_RESTART_Pos ) |
+                          ( I2C0_IC_DATA_CMD_STOP_ENABLE << I2C0_IC_DATA_CMD_STOP_Pos ) |
+                          ( I2C0_IC_DATA_CMD_CMD_WRITE << I2C0_IC_DATA_CMD_CMD_Pos ) |
+                          regAdd );
+
+    while ( I2C0->IC_RAW_INTR_STAT_b.TX_EMPTY != I2C0_IC_INTR_STAT_R_TX_EMPTY_ACTIVE );
+    while ( I2C0->IC_RAW_INTR_STAT_b.STOP_DET != I2C0_IC_INTR_STAT_R_STOP_DET_ACTIVE );
+
+    I2C0->IC_DATA_CMD = ( ( I2C0_IC_DATA_CMD_RESTART_DISABLE << I2C0_IC_DATA_CMD_RESTART_Pos ) |
+                          ( I2C0_IC_DATA_CMD_STOP_ENABLE << I2C0_IC_DATA_CMD_STOP_Pos ) |
+                          ( I2C0_IC_DATA_CMD_CMD_READ << I2C0_IC_DATA_CMD_CMD_Pos ) );
+
+    while ( !( I2C0->IC_RXFLR) );
+    //while ( I2C0->IC_RAW_INTR_STAT_b.RX_DONE );
+
+    data[0] = I2C0->IC_DATA_CMD_b.DAT;
+}
+
+//-----------------------------------------------------------------------------
+void i2cWrite( uint8_t slvAdd, uint8_t* data, uint8_t len )
+{
+    I2C0->IC_ENABLE = 0;
+    I2C0->IC_TAR = slvAdd;
+    I2C0->IC_ENABLE = 1;
+
+    for (uint8_t cnt = 0; cnt < len; cnt++ )
+    {
+    //bool firstByte = ( cnt == 0 ? true : false );
+    bool lastByte  = ( ( len - cnt ) == 1 ? true : false );
+    I2C0->IC_DATA_CMD = ( ( I2C0_IC_DATA_CMD_RESTART_DISABLE << I2C0_IC_DATA_CMD_RESTART_Pos ) |
+                          ( ( lastByte ? I2C0_IC_DATA_CMD_STOP_ENABLE : I2C0_IC_DATA_CMD_STOP_DISABLE ) << I2C0_IC_DATA_CMD_STOP_Pos ) |
+                          //( I2C0_IC_DATA_CMD_CMD_WRITE << I2C0_IC_DATA_CMD_CMD_Pos ) |
+                          *data++ );
+
+    while ( I2C0->IC_RAW_INTR_STAT_b.TX_EMPTY != I2C0_IC_INTR_STAT_R_TX_EMPTY_ACTIVE );
+    }
+}
+
+//-----------------------------------------------------------------------------
+uint8_t convBin2hex(uint8_t input)
+{
+    uint8_t retVal = 'q';
+
+    if ( ( input & 0x0F ) <= 9 )
+    {
+      retVal = ( input & 0x0F ) + '0';
+    }
+    else if ( ( input & 0x0F ) >= 0x0a )
+    {
+      retVal = ( ( input & 0x0F ) - 10 ) + 'a';
+    }
+
+    return retVal;
+}
+
+//-----------------------------------------------------------------------------
+void printByte( uint8_t data )
+{
+    uart_putc('[');
+    uart_putc( convBin2hex( data >> 4 ));
+    uart_putc( convBin2hex( data ));
+    uart_puts("]\n\r");
+}
+
+//-----------------------------------------------------------------------------
 int main(void)
 {
   uint32_t cnt = 0;
   bool fast = false;
   char rxch;
+  uint8_t devSlvAdd = 0x76;  // BMP280 sensor i2c address
 
   sys_init();
   timer_init();
   uart_init(115200);
+  i2c0_init();
 
-  uart_puts("\r\nHello, world!\r\n");
+  uart_puts("\r\n ------ Testing RP2400 Communication ports ------ \r\n");
 
+  //HAL_GPIO_PINX_out();
+  //HAL_GPIO_PINX_set();
+  
   HAL_GPIO_LED_out();
   HAL_GPIO_LED_clr();
 
   HAL_GPIO_BUTTON_in();
   HAL_GPIO_BUTTON_pullup();
 
+  HAL_GPIO_I2C0_SCL_pullup();
+  HAL_GPIO_I2C0_SDA_pullup();
+
+
+  uint32_t x = 0;
+  uart_puts("\r\nWait..\r\n");
+  while( x++ < 5000000 );
+
+  // BMP280 sensor basic cfg data
+  uint8_t cfgData[3] = { 0xf4,
+                         0x27,
+                         0x00 };
+
+  uart_puts("\r\nWriting cfg\r\n");
+  i2cWrite( devSlvAdd, &cfgData[0], 3);
+
+  uint32_t timeCnt = 0;
   while (1)
   {
     if (HAL_GPIO_BUTTON_read())
@@ -208,6 +337,38 @@ int main(void)
     {
       uart_putc(fast ? invert_case(rxch) : rxch);
     }
+
+    if ( !( timeCnt % ( 1024 * 4000 ) ) )
+    {
+      uart_puts("\r\nRead I2C\r\n");
+    
+      uint8_t data;
+
+      uart_puts("DevId\r\n");
+      i2cRead( devSlvAdd, 0xd0, &data, 1 );
+      printByte( data );
+
+      uart_puts("Press\r\n");
+      i2cRead( devSlvAdd, 0xf9, &data, 1 );
+      printByte( data );
+
+      i2cRead( devSlvAdd, 0xf8, &data, 1 );
+      printByte( data );
+
+      i2cRead( devSlvAdd, 0xf7, &data, 1 );
+      printByte( data );
+
+      uart_puts("Temp\r\n");
+      i2cRead( devSlvAdd, 0xfc, &data, 1 );
+      printByte( data );
+
+      i2cRead( devSlvAdd, 0xfb, &data, 1 );
+      printByte( data );
+
+      i2cRead( devSlvAdd, 0xfa, &data, 1 );
+      printByte( data );
+    }
+    timeCnt++;
   }
 
   return 0;
