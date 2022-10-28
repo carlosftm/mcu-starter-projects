@@ -58,7 +58,7 @@ $(BUILD)/$(BIN).bin: $(BUILD)/$(BIN).elf
 
 $(BUILD)/$(BIN).uf2: $(BUILD)/$(BIN).bin
 	@echo BIN2UF2 $@
-	@bin2uf2 -i $^ -o $@
+	@../tools/bin2uf2 -i $^ -o $@
 
 %.o:
 	@echo CC $@
